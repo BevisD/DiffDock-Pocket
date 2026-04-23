@@ -240,31 +240,21 @@ def add_edges(G):
 
 
 def modify_sidechain_torsion_angle(pos, edge_index, mask_subcomponent, subcomponents, torsion_update, as_numpy=False):
-    # modify single sidechain torsion angle 
-    pos = copy.deepcopy(pos)
-    orig_device = None
-    if type(pos) != np.ndarray:
-        orig_device = pos.device
-        pos = pos.cpu().numpy()
+    # modify single sidechain torsion angle
+    pos_new = pos.clone()
 
     assert len(edge_index) == 2 # make sure that its just a single bond
-    if torsion_update != 0:
-        u, v = edge_index[0], edge_index[1]
-        mask_rotate = subcomponents[mask_subcomponent[0]:mask_subcomponent[1]]
-        if type(mask_rotate) != np.ndarray: mask_rotate = mask_rotate.cpu().numpy()
+    u, v = edge_index[0], edge_index[1]
+    mask_rotate = subcomponents[mask_subcomponent[0]:mask_subcomponent[1]]
 
-        try:
-            rot_vec = pos[u] - pos[v]  # convention: positive rotation if pointing inwards
-            rot_vec = rot_vec * torsion_update / np.linalg.norm(rot_vec)  # idx_edge!
-            rot_mat = R.from_rotvec(rot_vec).as_matrix()
-            pos[mask_rotate] = (pos[mask_rotate] - pos[v]) @ rot_mat.T + pos[v]
-        except Exception as e:
-            print(f'Skipping sidechain update because of the error:')
-            print(e)
+    try:
+        rot_vec = pos_new[u] - pos_new[v]  # convention: positive rotation if pointing inwards
+        rot_vec = rot_vec * torsion_update / torch.norm(rot_vec)  # idx_edge!
+        rot_mat = axis_angle_to_matrix(rot_vec)
+        pos_new[mask_rotate] = (pos_new[mask_rotate] - pos_new[v]) @ rot_mat.T + pos_new[v]
+    except Exception as e:
+        print(f'Skipping sidechain update because of the error:')
+        print(e)
 
-    if not as_numpy:
-        pos = torch.from_numpy(pos.astype(np.float32))
-        pos = pos.to(orig_device)
+    return pos_new
 
-    return pos
-    
