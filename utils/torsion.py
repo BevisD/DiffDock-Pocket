@@ -6,7 +6,7 @@ from scipy.spatial.transform import Rotation as R
 from torch_geometric.utils import to_networkx
 from torch_geometric.data import Data
 
-from utils.geometry import rigid_transform_Kabsch_independent_torch
+from utils.geometry import rigid_transform_Kabsch_independent_torch, axis_angle_to_matrix
 
 """
     Preprocessing and computation for torsional updates to conformers
@@ -66,32 +66,23 @@ def get_transformation_mask(pyg_data):
 
 
 def modify_conformer_torsion_angles(pos, edge_index, mask_rotate, torsion_updates, as_numpy=False):
-    pos = copy.deepcopy(pos)
-    orig_device = None
-    if type(pos) != np.ndarray:
-        orig_device = pos.device
-        pos = pos.cpu().numpy()
+    pos_new = pos.clone()
 
-    for idx_edge, e in enumerate(edge_index.cpu().numpy()):
-        if torsion_updates[idx_edge] == 0:
-            continue
+    for idx_edge, e in enumerate(edge_index):
         u, v = e[0], e[1]
 
         # check if need to reverse the edge, v should be connected to the part that gets rotated
         assert not mask_rotate[idx_edge, u]
         assert mask_rotate[idx_edge, v]
 
-        rot_vec = pos[u] - pos[v]  # convention: positive rotation if pointing inwards
-        rot_vec = rot_vec * torsion_updates[idx_edge] / np.linalg.norm(rot_vec) # idx_edge!
-        rot_mat = R.from_rotvec(rot_vec).as_matrix()
+        rot_vec = pos_new[u] - pos_new[v]  # convention: positive rotation if pointing inwards
+        rot_vec = rot_vec * torsion_updates[idx_edge] / torch.norm(rot_vec) # idx_edge!
+        rot_mat = axis_angle_to_matrix(rot_vec)
 
-        pos[mask_rotate[idx_edge]] = (pos[mask_rotate[idx_edge]] - pos[v]) @ rot_mat.T + pos[v]
+        pos_new[mask_rotate[idx_edge]] = (pos_new[mask_rotate[idx_edge]] - pos_new[v]) @ rot_mat.T + pos_new[v]
 
-    if not as_numpy:
-        pos = torch.from_numpy(pos.astype(np.float32))
-        pos = pos.to(orig_device)
+    return pos_new
 
-    return pos
 
 def get_dihedrals(data_list):
     edge_index, edge_mask = data_list[0]['ligand', 'ligand'].edge_index, data_list[0]['ligand'].edge_mask

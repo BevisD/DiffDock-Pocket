@@ -1,6 +1,12 @@
 results/
 data/PDBBIND_atomCorrected/
 workdir/
+.p.npy
+.score.npy
+.so3_cdf_vals2.npy
+.so3_exp_score_norms2.npy
+.so3_omegas_array2.npy
+.so3_score_norms2.npy
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,pycharm+all
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,pycharm+all
