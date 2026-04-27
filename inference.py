@@ -36,10 +36,18 @@ from pathlib import Path
 from openmm.unit import megajoule, mole
 
 
-if os.name != 'nt':  # The line does not work on Windows
+if os.name != 'nt':
     import resource
-    rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (64000, rlimit[1]))
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+    # Only raise if safe
+    if hard >= 64000:
+        target = 64000
+    else:
+        target = hard
+
+    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
 
 RDLogger.DisableLog('rdApp.*')
 
