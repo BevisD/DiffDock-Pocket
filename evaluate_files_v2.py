@@ -458,24 +458,53 @@ def find_rank_files(complex_dir: Path) -> Dict[int, Tuple[Path, Optional[Path]]]
     return results
 
 
-def extract_pdb_id(dir_name: str) -> Optional[str]:
+def extract_pdb_id_and_ligand_ext(dir_name: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Extract PDB ID from a complex directory name.
+    Extract PDB ID and ground-truth ligand extension from a complex directory name.
 
     Expected format:
       index{N}___{pdb_id}_protein_esmfold_aligned_tr_fix.pdb___{pdb_id}_ligand.mol2
-    Falls back to regex search for a 4-character PDB-style token.
+
+    The third ___-separated part is the ligand filename and carries the correct
+    extension (mol2 or sdf), so we read it directly rather than guessing.
+    Falls back to a regex search for the PDB ID if the format doesn't match.
+
+    Returns
+    -------
+    (pdb_id, ligand_ext)  e.g. ('6d5w', '.mol2')
+    Either value may be None if it cannot be determined.
     """
     parts = dir_name.split("___")
+    pdb_id: Optional[str] = None
+    ligand_ext: Optional[str] = None
+
     if len(parts) >= 2:
-        return parts[1].split("_")[0].lower()
-    m = re.search(r"(?<![a-z0-9])([0-9][a-z0-9]{3})(?![a-z0-9])", dir_name.lower())
-    return m.group(1) if m else None
+        pdb_id = parts[1].split("_")[0].lower()
+
+    if len(parts) >= 3:
+        ligand_filename = parts[2]          # e.g. "6d5w_ligand.mol2"
+        suffix = Path(ligand_filename).suffix.lower()   # e.g. ".mol2"
+        if suffix in (".mol2", ".sdf"):
+            ligand_ext = suffix
+
+    if pdb_id is None:
+        m = re.search(r"(?<![a-z0-9])([0-9][a-z0-9]{3})(?![a-z0-9])", dir_name.lower())
+        pdb_id = m.group(1) if m else None
+
+    return pdb_id, ligand_ext
 
 
-def find_gt_ligand(gt_dir: Path, pdb_id: str) -> Optional[Path]:
-    """Return ground-truth ligand path, preferring SDF over MOL2."""
-    for ext in (".sdf", ".mol2"):
+def find_gt_ligand(gt_dir: Path, pdb_id: str, ligand_ext: Optional[str] = None) -> Optional[Path]:
+    """
+    Return the ground-truth ligand path.
+
+    If *ligand_ext* is provided (read from the directory name), it is tried
+    first. Falls back to trying both extensions so the function remains
+    robust if the directory name is ever in an unexpected format.
+    """
+    preferred = [ligand_ext] if ligand_ext else []
+    fallbacks = [ext for ext in (".mol2", ".sdf") if ext != ligand_ext]
+    for ext in preferred + fallbacks:
         p = gt_dir / f"{pdb_id}_ligand{ext}"
         if p.exists():
             return p
@@ -502,6 +531,7 @@ def find_gt_protein(gt_dir: Path, pdb_id: str) -> Optional[Path]:
 def evaluate_complex(
     complex_dir: Path,
     pdb_id: str,
+    ligand_ext: Optional[str],
     data_dir: Path,
     top_ks: List[int],
     clash_overlap: float,
@@ -516,7 +546,7 @@ def evaluate_complex(
     """
     gt_dir = data_dir / pdb_id
 
-    gt_lig_path  = find_gt_ligand(gt_dir, pdb_id)
+    gt_lig_path  = find_gt_ligand(gt_dir, pdb_id, ligand_ext)
     gt_prot_path = find_gt_protein(gt_dir, pdb_id)
 
     if gt_lig_path is None:
@@ -771,14 +801,14 @@ def main() -> None:
         print(f"Whitelist: {len(pdb_whitelist)} PDB IDs.")
 
     # ── Discover complex directories ──────────────────────────────────────────
-    complex_entries: List[Tuple[Path, str]] = []
+    complex_entries: List[Tuple[Path, str, Optional[str]]] = []  # (dir, pdb_id, ligand_ext)
     seen: set = set()
 
     for results_dir in args.results_dir:
         for subdir in sorted(results_dir.iterdir()):
             if not subdir.is_dir():
                 continue
-            pdb_id = extract_pdb_id(subdir.name)
+            pdb_id, ligand_ext = extract_pdb_id_and_ligand_ext(subdir.name)
             if pdb_id is None:
                 if args.verbose:
                     print(f"  [SKIP] Cannot parse PDB ID: {subdir.name}")
@@ -789,7 +819,7 @@ def main() -> None:
                 warnings.warn(f"Duplicate PDB ID {pdb_id} — skipping second occurrence.")
                 continue
             seen.add(pdb_id)
-            complex_entries.append((subdir, pdb_id))
+            complex_entries.append((subdir, pdb_id, ligand_ext))
 
     if not complex_entries:
         print("ERROR: No valid complex directories found.")
@@ -804,12 +834,13 @@ def main() -> None:
     rows: List[Dict] = []
     n_skipped = 0
 
-    for complex_dir, pdb_id in tqdm(complex_entries, desc="Evaluating"):
+    for complex_dir, pdb_id, ligand_ext in tqdm(complex_entries, desc="Evaluating"):
         if args.verbose:
             print(f"\nEvaluating {pdb_id}  ({complex_dir.name})")
         result = evaluate_complex(
             complex_dir=complex_dir,
             pdb_id=pdb_id,
+            ligand_ext=ligand_ext,
             data_dir=args.data_dir,
             top_ks=args.top_k,
             clash_overlap=args.clash_overlap,
