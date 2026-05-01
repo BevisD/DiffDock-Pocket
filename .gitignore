@@ -1,5 +1,6 @@
 results/
 data/PDBBIND_atomCorrected/
+data/posebusters/
 workdir/
 .p.npy
 .score.npy
