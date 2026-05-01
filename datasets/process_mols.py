@@ -724,11 +724,24 @@ def get_fullrec_graph(rec, rec_coords, c_alpha_coords, n_coords, c_coords, misc_
     return
 
 def write_mol_with_coords(mol, new_coords, path):
-    w = Chem.SDWriter(path)
+    coords = new_coords.astype(np.double)
+
+    # Warn on coordinate explosion before writing (V2000 max is ~±999 Å)
+    max_coord = np.abs(coords).max()
+    if max_coord > 999.0:
+        warnings.warn(
+            f"{path}: coordinates exploded (max={max_coord:.1f} Å) — "
+            "this is a DiffDock inference failure, not a format issue."
+        )
+
     conf = mol.GetConformer()
     for i in range(mol.GetNumAtoms()):
-        x,y,z = new_coords.astype(np.double)[i]
-        conf.SetAtomPosition(i,Point3D(x,y,z))
+        conf.SetAtomPosition(i, Point3D(*coords[i]))
+
+    # forceV3000=True removes the 10-char fixed-width column constraint,
+    # handling arbitrarily large (or small) coordinates safely.
+    w = Chem.SDWriter(str(path))
+    w.SetForceV3000(True)
     w.write(mol)
     w.close()
 
