@@ -44,11 +44,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import warnings
-from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -95,7 +93,13 @@ except ImportError:
 # =============================================================================
 
 # Bondi VDW radii (Angstrom)
-from datasets.steric_clash import VAN_DER_WAALS_RADII
+VDW_RADII: Dict[str, float] = {
+    "H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "F": 1.47,
+    "P": 1.80, "S": 1.80, "Cl": 1.75, "Br": 1.85, "I": 1.98,
+    "Si": 2.10, "Fe": 1.80, "Zn": 1.39, "Ca": 1.74, "Mg": 1.73,
+    "Mn": 1.73, "Cu": 1.40, "Co": 1.63, "Se": 1.90, "B": 1.92,
+    "As": 1.85, "Li": 1.82, "Na": 2.27, "K": 2.75,
+}
 DEFAULT_VDW = 1.70  # fallback for unknown elements
 
 # Backbone atom names — everything else is a sidechain atom
@@ -418,8 +422,8 @@ def compute_steric_clashes(
     prot_coords  = np.array(prot_coords_list)
     dist_matrix  = cdist(lig_coords, prot_coords)          # (n_lig, n_prot)
 
-    lig_radii  = np.array([VAN_DER_WAALS_RADII.get(e, DEFAULT_VDW) for e in lig_elements])[:, None]
-    prot_radii = np.array([VAN_DER_WAALS_RADII.get(e, DEFAULT_VDW) for e in prot_elements_list])[None, :]
+    lig_radii  = np.array([VDW_RADII.get(e, DEFAULT_VDW) for e in lig_elements ])[:, None]
+    prot_radii = np.array([VDW_RADII.get(e, DEFAULT_VDW) for e in prot_elements_list])[None, :]
 
     clashing = np.any(dist_matrix < (lig_radii + prot_radii) * overlap_factor, axis=1)
     return float(clashing.sum() / max(len(clashing), 1))
@@ -665,38 +669,6 @@ def evaluate_complex(
     return result
 
 
-
-# =============================================================================
-# Multiprocessing worker
-# =============================================================================
-
-def _worker(task: Tuple) -> Tuple[Optional[Dict], str]:
-    """
-    Top-level worker called by multiprocessing.Pool.
-
-    Must be a module-level function (not a lambda or nested def) so that
-    pickle can serialise it for the worker processes.  Each task is a plain
-    tuple so that no non-picklable objects (e.g. open file handles) are sent
-    across process boundaries.
-
-    Verbose output is intentionally suppressed here; interleaved prints from
-    concurrent workers are unreadable.  Warnings are still emitted per-process
-    and will surface in the terminal.
-    """
-    complex_dir, pdb_id, ligand_ext, data_dir, top_ks, clash_overlap, superimpose_backbone = task
-    result = evaluate_complex(
-        complex_dir=complex_dir,
-        pdb_id=pdb_id,
-        ligand_ext=ligand_ext,
-        data_dir=data_dir,
-        top_ks=top_ks,
-        clash_overlap=clash_overlap,
-        superimpose_backbone=superimpose_backbone,
-        verbose=False,
-    )
-    return result, pdb_id
-
-
 # =============================================================================
 # Aggregate statistics
 # =============================================================================
@@ -804,14 +776,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose", "-v", action="store_true", default=False,
         help="Print per-complex progress and skip reasons.",
     )
-    p.add_argument(
-        "--n_workers", type=int, default=os.cpu_count(),
-        help=(
-            "Number of parallel worker processes. "
-            "Defaults to all available CPU cores. "
-            "Use 1 to disable multiprocessing (useful for debugging)."
-        ),
-    )
     return p
 
 
@@ -861,47 +825,32 @@ def main() -> None:
         print("ERROR: No valid complex directories found.")
         sys.exit(1)
 
-    n_workers = max(1, args.n_workers or 1)
     print(f"Found {len(complex_entries)} complexes.")
     print(f"Top-K values:       {args.top_k}")
     print(f"Clash overlap:      {args.clash_overlap}")
-    print(f"Superimpose Ca:     {args.superimpose_backbone}")
-    print(f"Workers:            {n_workers}")
+    print(f"Superimpose Cα:     {args.superimpose_backbone}")
 
     # ── Evaluate ──────────────────────────────────────────────────────────────
-    tasks = [
-        (complex_dir, pdb_id, ligand_ext,
-         args.data_dir, args.top_k, args.clash_overlap, args.superimpose_backbone)
-        for complex_dir, pdb_id, ligand_ext in complex_entries
-    ]
-
     rows: List[Dict] = []
     n_skipped = 0
 
-    def _collect(results_iter) -> None:
-        for result, pdb_id in tqdm(results_iter, total=len(tasks), desc="Evaluating"):
-            if result is None:
-                if args.verbose:
-                    print(f"  [SKIP] {pdb_id}")
-                n_skipped_ref[0] += 1
-            else:
-                rows.append(result)
-
-    n_skipped_ref = [0]  # mutable container so the nested fn can write to it
-
-    if n_workers == 1:
-        # Serial path: keeps --verbose output, avoids multiprocessing overhead,
-        # and makes stack traces readable during debugging.
-        _collect(map(_worker, tasks))
-    else:
-        # Parallel path: imap_unordered returns results as soon as each worker
-        # finishes, keeping all CPUs busy and letting tqdm update in real time.
-        # maxtasksperchild recycles workers periodically to bound memory growth
-        # from accumulated RDKit / BioPython objects across many complexes.
-        with Pool(processes=n_workers, maxtasksperchild=50) as pool:
-            _collect(pool.imap_unordered(_worker, tasks, chunksize=1))
-
-    n_skipped = n_skipped_ref[0]
+    for complex_dir, pdb_id, ligand_ext in tqdm(complex_entries, desc="Evaluating"):
+        if args.verbose:
+            print(f"\nEvaluating {pdb_id}  ({complex_dir.name})")
+        result = evaluate_complex(
+            complex_dir=complex_dir,
+            pdb_id=pdb_id,
+            ligand_ext=ligand_ext,
+            data_dir=args.data_dir,
+            top_ks=args.top_k,
+            clash_overlap=args.clash_overlap,
+            superimpose_backbone=args.superimpose_backbone,
+            verbose=args.verbose,
+        )
+        if result is None:
+            n_skipped += 1
+        else:
+            rows.append(result)
 
     print(f"\nEvaluated {len(rows)} complexes; skipped {n_skipped}.")
     if not rows:
