@@ -2,6 +2,7 @@ import torch
 from rdkit.Chem import GetPeriodicTable
 
 from datasets.steric_clash import VAN_DER_WAALS_RADII, OVERLAP_DISTANCE
+from utils.diffusion_utils import modify_conformer, modify_sidechains
 
 PERIODIC_TABLE = GetPeriodicTable()
 
@@ -62,3 +63,32 @@ def get_steric_clash_energy(complex_graph):
     E += (lig_rec_overlap ** 2).sum()
 
     return E
+
+
+def get_potential_gradients(complex_graph, potential):
+    device = complex_graph["ligand"].pos.device
+    dtype = complex_graph["ligand"].pos.dtype
+
+    num_torsions = len(complex_graph['ligand'].mask_rotate)
+    num_sidechains = complex_graph['flexResidues'].num_nodes
+
+    tr_update = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
+    rot_update = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
+    tor_update = torch.zeros(num_torsions, device=device, dtype=dtype, requires_grad=True)
+    sidechain_tor_update = torch.zeros(num_sidechains, device=device, dtype=dtype, requires_grad=True)
+
+    complex_graph["ligand"].pos = complex_graph["ligand"].pos.detach()
+    complex_graph["atom"].pos = complex_graph["atom"].pos.detach()
+
+    modify_conformer(complex_graph, tr_update, rot_update, tor_update)
+    modify_sidechains(complex_graph, sidechain_tor_update)
+
+    pot = potential(complex_graph)
+    pot.backward()
+
+    tr_grad = tr_update.grad.detach()
+    rot_grad = rot_update.grad.detach()
+    tor_grad = tor_update.grad.detach()
+    sidechain_tor_grad = sidechain_tor_update.grad.detach()
+
+    return tr_grad, rot_grad, tor_grad, sidechain_tor_grad
