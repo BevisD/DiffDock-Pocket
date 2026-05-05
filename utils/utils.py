@@ -270,11 +270,13 @@ def get_available_devices(max_devices=None):
             num_gpus = min(num_gpus, max_devices)
         gpu_list = [get_device(i) for i in range(num_gpus)]
         return gpu_list
+    elif device.type == "cpu":
+        num_cpus = torch.multiprocessing.cpu_count()
+        if max_devices is not None:
+            num_cpus = min(num_cpus, max_devices)
+        return [device]*num_cpus
     else:
-        num_devices = 1
-        if max_devices is None and device.type == "cpu":
-            num_devices = torch.multiprocessing.cpu_count()
-        return [device]*num_devices
+        return [device]
 
 
 def get_device(gpu_id: int):
