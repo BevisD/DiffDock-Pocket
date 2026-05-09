@@ -4,7 +4,7 @@ import torch
 from torch_geometric.data import Batch
 
 from utils.diffusion_utils import modify_conformer, set_time, modify_sidechains
-from utils.potentials import get_steric_clash_energy, get_potential_gradients
+from utils.potentials import get_potential_gradients
 
 
 # ────────────────────────── small helpers ───────────────────────────────
@@ -36,7 +36,7 @@ def _set_time_on_batch(batch, t_idx, t_tr, t_rot, t_tor, t_sc, t_schedule, model
                                          and model_args.include_miscellaneous_atoms)
 
 
-def _terminal_adjoint(data_list, device, flexible_sidechains, energy_fn=get_steric_clash_energy):
+def _terminal_adjoint(data_list, device, flexible_sidechains, energy_fn):
     """ã_K = ∇E(X_K), per molecule, stacked / concatenated."""
     tr_l, rot_l, tor_l, sc_l = [], [], [], []
     for cg in data_list:
@@ -81,13 +81,12 @@ def _restore_positions(data_list, traj_t, sc_traj_t, flexible_sidechains, no_sc_
 
 # ────────────────────────────── main ────────────────────────────────────
 
-def adjoint_loss(data_list, model_base, model_finetune, inference_steps,
+def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_steps,
                  tr_schedule, rot_schedule, tor_schedule,
                  sidechain_tor_schedule, device, t_to_sigma, model_args,
                  tr_weight=1, rot_weight=1, tor_weight=1, sc_tor_weight=1,
                  asyncronous_noise_schedule=False, t_schedule=None,
-                 no_final_step_noise=False, pivot=None, flexible_sidechains=None,
-                 energy_fn=get_steric_clash_energy):
+                 no_final_step_noise=False, pivot=None, flexible_sidechains=None):
     """
     Returns
     -------

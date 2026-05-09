@@ -8,7 +8,7 @@ import torch
 from utils.diffusion_utils import get_t_schedule, get_inverse_schedule
 
 
-def finetune_epoch(model_base, model_finetune, loader, optimizer, device, t_to_sigma, loss_fn, ema_weigths, args):
+def finetune_epoch(model_base, model_finetune, loader, energy_fn, optimizer, device, t_to_sigma, loss_fn, ema_weigths, args):
     model_finetune.train()
     model_base.eval()
     meter = AverageMeter(['total_loss', 'total_base_loss', 'tr_loss', 'rot_loss', 'tor_loss', 'sc_tor_loss', 'tr_base_loss', 'rot_base_loss', 'tor_base_loss','sc_tor_base_loss'])
@@ -31,7 +31,7 @@ def finetune_epoch(model_base, model_finetune, loader, optimizer, device, t_to_s
             print("Skipping batch of size 1 since otherwise batchnorm would not work.")
         optimizer.zero_grad()
         try:
-            loss, log_dict = loss_fn(data_row, model_base, model_finetune, args.inference_steps, tr_schedule, rot_schedule, tor_schedule, sidechain_tor_schedule, device, t_to_sigma, args)
+            loss, log_dict = loss_fn(data_row, model_base, model_finetune, energy_fn, args.inference_steps, tr_schedule, rot_schedule, tor_schedule, sidechain_tor_schedule, device, t_to_sigma, args)
 
             if loss.isnan():
                 print("SKIPPING backward pass for batch, loss is nan. This could indicate that the batch has no ligand torsion or sidechain torsions")

@@ -5,6 +5,7 @@ from functools import partial
 from argparse import Namespace
 
 import torch
+from utils.potentials import get_energy_function
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -33,7 +34,7 @@ from utils.utils import save_yaml_file, get_optimizer_and_scheduler, get_model, 
     get_default_device
 
 
-def finetune(args, model_base, model_finetune, optimizer, scheduler, ema_weights, train_loader, val_loader, t_to_sigma,
+def finetune(args, model_base, model_finetune, energy_fn, optimizer, scheduler, ema_weights, train_loader, val_loader, t_to_sigma,
              run_dir):
     device = args.device
     best_val_loss = math.inf
@@ -51,7 +52,7 @@ def finetune(args, model_base, model_finetune, optimizer, scheduler, ema_weights
     for epoch in range(args.n_epochs):
         if epoch % 5 == 0: print("Run name: ", args.run_name)
         logs = {}
-        train_losses = finetune_epoch(model_base, model_finetune, train_loader, optimizer, device, t_to_sigma, loss_fn,
+        train_losses = finetune_epoch(model_base, model_finetune, train_loader, energy_fn, optimizer, device, t_to_sigma, loss_fn,
                                       ema_weights, args)
         print("Epoch {}: Training loss {:.4f}  tr {:.4f}   rot {:.4f}   tor {:.4f}  sc_tor {:.4f}"
               .format(epoch, train_losses['loss'], train_losses['tr_loss'], train_losses['rot_loss'],
@@ -193,6 +194,8 @@ def main_function():
     t_to_sigma = partial(t_to_sigma_compl, args=args)
     train_loader, val_loader = construct_loader(args, t_to_sigma)
 
+    energy_fn = get_energy_function(args.energy_fn, args)
+
     with open(f'{args.base_model_dir}/model_parameters.yml') as f:
         base_model_args = Namespace(**yaml.full_load(f))
 
@@ -248,7 +251,7 @@ def main_function():
     yaml_file_name = os.path.join(run_dir, 'model_parameters.yml')
     save_yaml_file(yaml_file_name, args.__dict__)
 
-    finetune(args, model_base, model_finetune, optimizer, scheduler, ema_weights, train_loader, val_loader, t_to_sigma,
+    finetune(args, model_base, model_finetune, energy_fn, optimizer, scheduler, ema_weights, train_loader, val_loader, t_to_sigma,
              run_dir)
 
 

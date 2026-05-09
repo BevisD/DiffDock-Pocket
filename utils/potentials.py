@@ -37,32 +37,37 @@ def get_steric_clash_overlap(pos_1, pos_2, atomic_numbers_1, atomic_numbers_2):
     return torch.clamp(ramanchandran_radii - cross_distances, min=0.0)
 
 
-def get_steric_clash_energy(complex_graph):
-    lig_pos = complex_graph["ligand"].pos
-    rec_pos = complex_graph["atom"].pos
+class StericClashEnergy:
+    def __init__(self, args):
+        self.energy_weight = args.energy_weight
 
-    lig_z = get_ligand_atomic_numbers(complex_graph)
-    rec_z = get_rec_atomic_numbers(complex_graph)
+    def __call__(self, complex_graph):
+        lig_pos = complex_graph["ligand"].pos
+        rec_pos = complex_graph["atom"].pos
 
-    E = torch.zeros((), device=lig_pos.device, dtype=lig_pos.dtype)
+        lig_z = get_ligand_atomic_numbers(complex_graph)
+        rec_z = get_rec_atomic_numbers(complex_graph)
 
-    lig_lig_overlap = get_steric_clash_overlap(
-        lig_pos[None, :],
-        lig_pos[None, :],
-        lig_z,
-        lig_z,
-    )
-    E += (lig_lig_overlap ** 2).sum()
+        E = torch.zeros((), device=lig_pos.device, dtype=lig_pos.dtype)
 
-    lig_rec_overlap = get_steric_clash_overlap(
-        lig_pos[None, :],
-        rec_pos[None, :],
-        lig_z,
-        rec_z,
-    )
-    E += (lig_rec_overlap ** 2).sum()
+        lig_lig_overlap = get_steric_clash_overlap(
+            lig_pos[None, :],
+            lig_pos[None, :],
+            lig_z,
+            lig_z,
+        )
+        E += (lig_lig_overlap ** 2).sum()
 
-    return E
+        lig_rec_overlap = get_steric_clash_overlap(
+            lig_pos[None, :],
+            rec_pos[None, :],
+            lig_z,
+            rec_z,
+        )
+        E += (lig_rec_overlap ** 2).sum()
+
+        return self.energy_weight * E
+
 
 
 def get_potential_gradients(complex_graph, potential):
@@ -92,3 +97,14 @@ def get_potential_gradients(complex_graph, potential):
     sidechain_tor_grad = sidechain_tor_update.grad.detach()
 
     return tr_grad, rot_grad, tor_grad, sidechain_tor_grad
+
+
+def get_energy_function(name, args):
+    registry = {
+        "steric_clash": StericClashEnergy,
+    }
+
+    if name not in registry:
+        raise ValueError(f"Unknown energy function: {name}")
+
+    return registry[name](args)
