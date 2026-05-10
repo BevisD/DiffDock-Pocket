@@ -11,6 +11,7 @@ import concurrent.futures
 
 from utils.diffusion_utils import modify_conformer, set_time, modify_sidechains
 from utils.torsion import modify_conformer_torsion_angles, get_dihedrals, get_torsion_angles_svgd, get_rigid_svgd
+from utils.potentials import get_potential_gradients
 from scipy.spatial.transform import Rotation as R
 
 def randomize_position(data_list, no_torsion, no_random, tr_sigma_max, pocket_knowledge=False, pocket_cutoff=7, flexible_sidechains=False):
@@ -71,7 +72,8 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
              no_random=False, ode=False, visualization_list=None, sidechain_visualization_list=None, confidence_model=None, filtering_data_list=None, filtering_model_args=None,
              asyncronous_noise_schedule=False, t_schedule=None, batch_size=32, no_final_step_noise=False, pivot=None, return_full_trajectory=False,
              svgd_weight=0.0, svgd_repulsive_weight=1.0, svgd_only=False, svgd_rot_rel_weight=1.0, svgd_tor_rel_weight=1.0, svgd_sidechain_tor_rel_weight = 1.0,
-             temp_sampling=1.0, temp_psi=0.0, temp_sigma_data=0.5, flexible_sidechains=None):
+             temp_sampling=1.0, temp_psi=0.0, temp_sigma_data=0.5, flexible_sidechains=None,
+             energy_fn=None, energy_sigma_scaling=True):
 
     flexible_sidechains = model_args.flexible_sidechains if flexible_sidechains is None else flexible_sidechains
 
@@ -125,6 +127,34 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
             sidechain_tor_score_list.append(sidechain_tor_score.cpu())
 
         tr_score, rot_score, tor_score, sidechain_tor_score = torch.cat(tr_score_list, dim=0), torch.cat(rot_score_list, dim=0), torch.cat(tor_score_list, dim=0), torch.cat(sidechain_tor_score_list, dim=0)
+
+        if energy_fn is not None:
+            results = [get_potential_gradients(g, energy_fn) for g in data_list]
+            tr_grads, rot_grads, tor_grads, sc_grads = zip(*results)
+
+            e_tr_grad = torch.stack(tr_grads)  # (N, 3)
+            e_rot_grad = torch.stack(rot_grads)  # (N, 3)
+            e_tor_grad = torch.cat(tor_grads)  # (N·T,)
+            e_sc_grad = torch.cat(sc_grads) if sc_grads[0] is not None else None  # (N·S,)
+
+            # Optionally scale by 1/σ² so guidance strength is σ-invariant
+            if energy_sigma_scaling:
+                tr_scale = 1.0 / (tr_sigma ** 2 + 1e-8)
+                rot_scale = 1.0 / (rot_sigma ** 2 + 1e-8)
+                tor_scale = 1.0 / (tor_sigma ** 2 + 1e-8)
+                sc_scale = 1.0 / (sidechain_tor_sigma ** 2 + 1e-8)
+            else:
+                tr_scale = rot_scale = tor_scale = sc_scale = 1.0
+
+            tr_score = tr_score + tr_scale * e_tr_grad.cpu()
+            rot_score = rot_score + rot_scale * e_rot_grad.cpu()
+
+            if not model_args.no_torsion and e_tor_grad is not None:
+                tor_score = tor_score + tor_scale * e_tor_grad.cpu()
+
+            if flexible_sidechains and e_sc_grad is not None:
+                sidechain_tor_score = (sidechain_tor_score
+                                       + sc_scale * e_sc_grad.cpu())
 
         tr_g = tr_sigma * torch.sqrt(torch.tensor(2 * np.log(model_args.tr_sigma_max / model_args.tr_sigma_min)))
         rot_g = 2 * rot_sigma * torch.sqrt(torch.tensor(np.log(model_args.rot_sigma_max / model_args.rot_sigma_min)))

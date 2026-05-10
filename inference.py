@@ -25,6 +25,7 @@ from torch_geometric.loader import DataLoader
 from datasets.process_mols import write_mol_with_coords, parse_pdb_from_path
 from datasets.pdbbind import PDBBind, load_protein_ligand_df
 from utils.diffusion_utils import t_to_sigma as t_to_sigma_compl, get_t_schedule
+from utils.potentials import get_energy_function
 from utils.sampling import randomize_position, sampling
 from utils.utils import get_model, get_available_devices, get_default_device, ensure_device
 from utils.visualise import PDBFile, SidechainPDBFile
@@ -94,6 +95,9 @@ def _get_parser():
     parser.add_argument('--keep_local_structures', action='store_true', default=False, help='Keeps the local structure when specifying an input with 3D coordinates instead of generating them with RDKit')
     parser.add_argument('--skip_existing', action='store_true', default=False, help='If the output directory already exists, skip the inference')
 
+    parser.add_argument('--energy_fn', type=str, default=None, help='Name of the energy function')
+    parser.add_argument('--energy_weight', type=float, default=1.0, help='Weight for energy guidance')
+    parser.add_argument('--no_energy_sigma_scaling', action='store_true', help='Don\'t energy guidance strength by the inverse square of sigma')
     # This is for low temperature sampling for each individual parameter
     # see Illuminating protein space with a programmable generative model, Appendix B
     # The default values will probably only work nicely for the model trained presented in the paper
@@ -112,7 +116,7 @@ def _get_parser():
 
 
 @ensure_device
-def infer_single_complex(idx: int, protein_ligand_info_row: Mapping, model: torch.nn.Module, args, score_model_args,
+def infer_single_complex(idx: int, protein_ligand_info_row: Mapping, model: torch.nn.Module, energy_fn, args, score_model_args,
                          filtering_args=None, filtering_model=None, filtering_model_args=None,
                          filtering_complex_dict=None,
                          t_schedule=None, tr_schedule=None,
@@ -201,7 +205,9 @@ def infer_single_complex(idx: int, protein_ligand_info_row: Mapping, model: torc
                                                         args.temp_sampling_tor, args.temp_sampling_sc_tor],
                                          temp_psi=[args.temp_psi_tr, args.temp_psi_rot, args.temp_psi_tor,
                                                    args.temp_psi_sc_tor],
-                                         flexible_sidechains=False if args.rigid else score_model_args.flexible_sidechains)
+                                         flexible_sidechains=False if args.rigid else score_model_args.flexible_sidechains,
+                                         energy_fn=energy_fn,
+                                         energy_sigma_scaling=False if args.no_energy_sigma_scaling else True)
 
         ligand_pos = np.asarray(
             [complex_graph['ligand'].pos.cpu().numpy() + orig_complex_graph.original_center.cpu().numpy() for
@@ -438,6 +444,8 @@ def main(args):
 
     t_to_sigma = partial(t_to_sigma_compl, args=score_model_args)
 
+    energy_fn = None if args.energy_fn is None else get_energy_function(args.energy_fn, args)
+
     model = get_model(score_model_args, device, t_to_sigma=t_to_sigma, no_parallel=True)
     state_dict = torch.load(f'{args.model_dir}/{args.ckpt}', map_location=device)
     model.load_state_dict(state_dict, strict=True)
@@ -475,7 +483,7 @@ def main(args):
     num_processes = len(devices)
     chunks = np.array_split(test_dataset.protein_ligand_df, num_processes)
 
-    process_chunk = functools.partial(infer_multiple_complexes, model=model, args=args,
+    process_chunk = functools.partial(infer_multiple_complexes, model=model, energy_fn=energy_fn, args=args,
                                       score_model_args=score_model_args,
                                       filtering_args=filtering_args, filtering_model=filtering_model,
                                       filtering_model_args=filtering_model_args,
