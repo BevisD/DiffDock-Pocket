@@ -456,11 +456,15 @@ def get_lig_graph(mol, complex_graph):
 def generate_conformer(mol):
     ps = AllChem.ETKDGv2()
     id = AllChem.EmbedMolecule(mol, ps)
+
     if id == -1:
-        print('rdkit coords could not be generated without using random coords. using random coords now.')
-        ps.useRandomCoords = True
-        AllChem.EmbedMolecule(mol, ps)
-        AllChem.MMFFOptimizeMolecule(mol, confId=0)
+        raise RuntimeError("rdkit could not embed molecule")
+    
+    # if id == -1:
+    #     print('rdkit coords could not be generated without using random coords. using random coords now.')
+    #     ps.useRandomCoords = True
+    #     AllChem.EmbedMolecule(mol, ps)
+    #     AllChem.MMFFOptimizeMolecule(mol, confId=0)
     # else:
     #    AllChem.MMFFOptimizeMolecule(mol_rdkit, confId=0)
 
