@@ -201,10 +201,11 @@ def main_function():
     if args.wandb:
         import wandb
         wandb.init(
-            entity='coarse-graining-mit',
+            entity='bd825-imperial-college-london',
             settings=wandb.Settings(start_method="fork"),
             project=args.project,
             name=args.run_name,
+            tags=['pretrain'],
             config=args
         )
         wandb.log({'numel': numel})
