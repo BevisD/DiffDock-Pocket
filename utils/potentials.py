@@ -24,12 +24,16 @@ def get_rec_atomic_numbers(complex_graph):
 
 
 def get_atomic_radii(atomic_numbers):
-    return VAN_DER_WAALS_RADII_LUT[atomic_numbers - 1]
+    device = atomic_numbers.device
+    return VAN_DER_WAALS_RADII_LUT[atomic_numbers.cpu() - 1].to(device)
 
 
 def get_steric_clash_overlap(pos_1, pos_2, atomic_numbers_1, atomic_numbers_2):
-    atomic_radii_1 = get_atomic_radii(atomic_numbers_1).unsqueeze(0)
-    atomic_radii_2 = get_atomic_radii(atomic_numbers_2).unsqueeze(0)
+    assert pos_1.device == pos_2.device
+    device = pos_1.device
+
+    atomic_radii_1 = get_atomic_radii(atomic_numbers_1).unsqueeze(0).to(device)
+    atomic_radii_2 = get_atomic_radii(atomic_numbers_2).unsqueeze(0).to(device)
 
     cross_distances = torch.cdist(pos_1, pos_2)
     ramanchandran_radii = atomic_radii_1[:, :, None] + atomic_radii_2[:, None, :] - 2 * OVERLAP_DISTANCE
