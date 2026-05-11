@@ -143,7 +143,7 @@ def parse_train_args():
     parser.add_argument('--no_aminoacid_identities', action='store_true', default=False, help='')
 
     # Fine-tuning
-    parser.add_argument('--base_model_dir', type=str, default='.cache/model', help='Folder from where to load the trained model')
+    parser.add_argument('--base_model_dir', type=str, default='.cache/model/v1.0.0/score_model', help='Folder from where to load the trained model')
     parser.add_argument('--base_model_ckpt', type=str, default='best_ema_inference_epoch_model.pt', help='Checkpoint to use for the score model')
     parser.add_argument('--energy_fn', type=str, default="steric_clash", help='Name of the energy function for finetuning')
     parser.add_argument('--energy_weight', type=float, default=1.0, help='Weight for energy guidance')
