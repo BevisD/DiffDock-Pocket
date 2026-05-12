@@ -5,6 +5,7 @@ import math
 import argparse
 from pathlib import Path
 from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 import pandas as pd
 from posebusters import PoseBusters
@@ -95,12 +96,16 @@ def eval_one_complex(task):
 
     for pose_idx, pose_path in enumerate(pose_files):
         try:
-            pb_df = buster.bust(
-                mol_pred=str(pose_path),
-                mol_true=str(true_ligand_path),
-                mol_cond=str(protein_path),
-                full_report=False,
-            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    buster.bust,
+                    mol_pred=str(pose_path),
+                    mol_true=str(true_ligand_path),
+                    mol_cond=str(protein_path),
+                    full_report=False,
+                )
+
+            pb_df = future.result(timeout=60)
             row = pb_df.iloc[0].copy()
 
             bool_cols = get_bool_columns(pb_df)
