@@ -96,10 +96,10 @@ def get_potential_gradients(complex_graph, potential):
         pot = potential(complex_graph)
         pot.backward()
 
-        tr_grad = tr_update.grad.detach()
-        rot_grad = rot_update.grad.detach()
-        tor_grad = tor_update.grad.detach()
-        sidechain_tor_grad = sidechain_tor_update.grad.detach()
+        tr_grad = tr_update.grad
+        rot_grad = rot_update.grad
+        tor_grad = tor_update.grad
+        sidechain_tor_grad = sidechain_tor_update.grad
 
     return tr_grad, rot_grad, tor_grad, sidechain_tor_grad
 
