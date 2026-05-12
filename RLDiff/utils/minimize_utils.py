@@ -10,6 +10,7 @@ Adapted from merge_sdfs.py and minimize_poses_gnina_rerank.py.
 import os
 import re
 import shutil
+import argparse
 import subprocess
 import tempfile
 import time
@@ -26,6 +27,18 @@ RDLogger.DisableLog("rdApp.warning")
 _FOLDER_RX = re.compile(r"^index\d+___(.+)$")
 # SDF file name: rank{n}.sdf or rank{n}_confidence{conf}.sdf
 _RANK_RX = re.compile(r"^rank(?P<rank>\d+)(?:_confidence(?P<conf>[-\d.]+))?\.sdf$")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Merge, minimize, and rerank DiffDock poses.")
+
+    parser.add_argument("--out_dir", type=Path, required=True, help="DiffDock inference output directory containing index*___* subfolders.")
+    parser.add_argument("--data_dir", type=Path, required=True,help="Root data directory, e.g. DiffDock-Pocket/data/PDBBIND_atomCorrected/")
+    parser.add_argument("--smina", type=str, default="smina", help="Path or name of smina executable.")
+    parser.add_argument("--gnina", type=str, default="gnina", help="Path or name of gnina executable.")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers.")
+
+    return parser.parse_args()
 
 
 # ─────────────────────────── merge ────────────────────────────────────
@@ -338,3 +351,72 @@ def minimize_and_rerank(out_dir: Path,
 
     print(f"\n[minimize] Done: {n_ok} OK, {n_fail} failed in {t_wall:.1f}s")
     print(f"  Outputs: {minimized_dir}")
+
+
+def build_protein_path_map(out_dir: Path, data_dir: Path) -> Dict[str, str]:
+    """
+    Scan out_dir for index*___* subfolders, extract PDB ID from the protein
+    filename component, and map complex_key -> *_protein_processed_fix.pdb.
+
+    Subfolder format: index{N}___{pdb_id}_protein_esmfold_aligned_tr_fix.pdb___{pdb_id}_ligand.mol2
+    """
+    protein_path_map: Dict[str, str] = {}
+
+    for sub in sorted(out_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        m = _FOLDER_RX.match(sub.name)
+        if not m:
+            continue
+
+        complex_key = m.group(1)  # everything after index{N}___
+
+        # complex_key = "{protein_filename}___{ligand_filename}"
+        parts = complex_key.split("___")
+        if len(parts) < 2:
+            print(f"  [WARN] Unexpected folder format, skipping: {sub.name}")
+            continue
+
+        protein_filename = parts[0]  # e.g. 6qqw_protein_esmfold_aligned_tr_fix.pdb
+
+        # Extract PDB ID: everything before "_protein_"
+        if "_protein_" not in protein_filename:
+            print(f"  [WARN] Cannot extract PDB ID from '{protein_filename}', skipping")
+            continue
+        pdb_id = protein_filename.split("_protein_")[0]  # e.g. "6qqw"
+
+        protein_pdb = data_dir / pdb_id / f"{pdb_id}_protein_processed_fix.pdb"
+        if not protein_pdb.is_file():
+            print(f"  [WARN] Protein PDB not found: {protein_pdb}, skipping")
+            continue
+
+        protein_path_map[complex_key] = str(protein_pdb)
+
+    return protein_path_map
+
+
+def main():
+    args = parse_args()
+
+    print(f"[main] Scanning subfolders in: {args.out_dir}")
+    protein_path_map = build_protein_path_map(args.out_dir, args.data_dir)
+
+    if not protein_path_map:
+        print("[main] No valid complexes found. Check --out_dir and --data_dir.")
+        return
+
+    print(f"[main] Found {len(protein_path_map)} complexes to process.")
+    for k, v in sorted(protein_path_map.items()):
+        print(f"  {k} -> {v}")
+
+    minimize_and_rerank(
+        out_dir=args.out_dir,
+        protein_path_map=protein_path_map,
+        smina_path=args.smina,
+        gnina_path=args.gnina,
+        n_workers=args.workers,
+    )
+
+
+if __name__ == "__main__":
+    main()
