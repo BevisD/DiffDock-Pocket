@@ -21,7 +21,6 @@ def _dt_at(schedule, t_idx, K):
 
 
 def _diff_coeffs(sigmas, model_args, factor_keys):
-    """Reverse-SDE diffusion coefficients g(t) for each factor."""
     tr_sigma, rot_sigma, tor_sigma, sc_tor_sigma = sigmas
     tr_g = tr_sigma * torch.sqrt(torch.tensor(2 * np.log(model_args.tr_sigma_max / model_args.tr_sigma_min)))
     rot_g = 2 * rot_sigma * torch.sqrt(torch.tensor(np.log(model_args.rot_sigma_max / model_args.rot_sigma_min)))
@@ -43,33 +42,33 @@ def _set_time_on_batch(batch, t_idx, t_tr, t_rot, t_tor, t_sc, t_schedule, model
                                          and model_args.include_miscellaneous_atoms)
 
 
-def _terminal_adjoint(data_list, device, factor_keys, energy_fn):
-    """ã_K = ∇E(X_K), per molecule, stacked / concatenated.
-    `get_potential_gradients` returns None for absent components — treat as zero."""
+def _terminal_adjoint(data_list, device, factor_keys, energy_fn, tor_counts, sc_tor_counts):
+    """ã_K = ∇E(X_K), per molecule. `get_potential_gradients` may return None — treat as zero
+    with the right per-molecule shape."""
     tr_l, rot_l, tor_l, sc_l = [], [], [], []
-    for cg in data_list:
+    for i, cg in enumerate(data_list):
         tr_g_, rot_g_, tor_g_, sc_g_ = get_potential_gradients(cg, energy_fn)
-        tr_l.append(tr_g_.detach().to(device))
-        rot_l.append(rot_g_.detach().to(device))
+        tr_l.append((tr_g_ if tr_g_ is not None else torch.zeros(3)).detach().to(device))
+        rot_l.append((rot_g_ if rot_g_ is not None else torch.zeros(3)).detach().to(device))
         if 'tor' in factor_keys:
-            tor_l.append((tor_g_ if tor_g_ is not None else torch.zeros(0)).detach().to(device))
+            g = tor_g_ if tor_g_ is not None else torch.zeros(tor_counts[i])
+            tor_l.append(g.detach().to(device))
         if 'sc_tor' in factor_keys:
-            sc_l.append((sc_g_ if sc_g_ is not None else torch.zeros(0)).detach().to(device))
-    out = {
-        'tr': torch.stack(tr_l, dim=0),
-        'rot': torch.stack(rot_l, dim=0),
-    }
+            g = sc_g_ if sc_g_ is not None else torch.zeros(sc_tor_counts[i])
+            sc_l.append(g.detach().to(device))
+    out = {'tr': torch.stack(tr_l, dim=0), 'rot': torch.stack(rot_l, dim=0)}
     if 'tor' in factor_keys: out['tor'] = torch.cat(tor_l, dim=0)
     if 'sc_tor' in factor_keys: out['sc_tor'] = torch.cat(sc_l, dim=0)
     return out
 
 
-def _apply_xi(data_list, xi, tor_per_mol, sc_tor_per_mol, factor_keys, pivot):
+def _apply_xi(data_list, xi, tor_offsets, sc_tor_offsets, factor_keys, pivot):
     """Apply the zero-with-grad Lie-algebra perturbation to each complex_graph."""
-    has_tor = 'tor' in factor_keys and tor_per_mol > 0
-    has_sc = 'sc_tor' in factor_keys and sc_tor_per_mol > 0
+    has_tor = 'tor' in factor_keys
+    has_sc = 'sc_tor' in factor_keys
     for i, cg in enumerate(data_list):
-        tor_slice = xi['tor'][i * tor_per_mol:(i + 1) * tor_per_mol] if has_tor else None
+        tor_slice = (xi['tor'][tor_offsets[i]:tor_offsets[i + 1]]
+                     if has_tor and tor_offsets[i + 1] > tor_offsets[i] else None)
         modify_conformer(
             cg,
             xi['tr'][i:i + 1],
@@ -77,14 +76,15 @@ def _apply_xi(data_list, xi, tor_per_mol, sc_tor_per_mol, factor_keys, pivot):
             tor_slice,
             pivot=pivot,
         )
-        if has_sc:
+        if has_sc and sc_tor_offsets[i + 1] > sc_tor_offsets[i]:
             modify_sidechains(
                 cg,
-                xi['sc_tor'][i * sc_tor_per_mol:(i + 1) * sc_tor_per_mol],
+                xi['sc_tor'][sc_tor_offsets[i]:sc_tor_offsets[i + 1]],
             )
 
 
 def _restore_positions(data_list, traj_t, sc_traj_t, flexible_sidechains, no_sc_in_batch, device):
+    """traj_t and sc_traj_t are Python lists of per-molecule tensors."""
     for i, cg in enumerate(data_list):
         cg['ligand'].pos = traj_t[i].clone().to(device)
         if flexible_sidechains and not no_sc_in_batch:
@@ -136,14 +136,29 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
     if flexible_sidechains:
         factor_keys = factor_keys + ('sc_tor',)
 
-    for p in model_base.parameters():  # ensure base is frozen
+    for p in model_base.parameters():
         p.requires_grad_(False)
 
     N, K = len(data_list), inference_steps
-    trajectory, sc_trajectory, g_trajectory = [], [], []
-    tor_per_mol = sc_tor_per_mol = 0
 
-    # ── Rollout under the FT-controlled SDE  (no autograd) ─────────────
+    # ── Per-molecule counts and cumulative offsets (variable across the batch) ──
+    if 'tor' in factor_keys:
+        tor_counts = [int(cg['ligand'].edge_mask.sum()) for cg in data_list]
+    else:
+        tor_counts = [0] * N
+    tor_offsets = np.cumsum([0] + tor_counts).tolist()  # length N+1
+    total_tor = tor_offsets[-1]
+
+    if 'sc_tor' in factor_keys and not no_sc_in_batch:
+        sc_tor_counts = [len(cg['flexResidues'].edge_idx) for cg in data_list]
+    else:
+        sc_tor_counts = [0] * N
+    sc_tor_offsets = np.cumsum([0] + sc_tor_counts).tolist()
+    total_sc_tor = sc_tor_offsets[-1]
+
+    trajectory, sc_trajectory, g_trajectory = [], [], []
+
+    # ── Rollout under FT-controlled SDE  (no autograd) ─────────────────
     with torch.no_grad():
         for t_idx in range(K):
             t_tr, t_rot, t_tor, t_sc = (tr_schedule[t_idx], rot_schedule[t_idx],
@@ -153,11 +168,11 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
             dt_tor = _dt_at(tor_schedule, t_idx, K)
             dt_sc = _dt_at(sidechain_tor_schedule, t_idx, K)
 
-            trajectory.append(torch.stack(
-                [cg['ligand'].pos.clone() for cg in data_list], dim=0))
-            sc_trajectory.append(None if no_sc_in_batch else torch.stack(
-                [cg['atom'].pos.clone()[cg['flexResidues'].subcomponents.unique()]
-                 for cg in data_list], dim=0))
+            # store positions as lists of per-molecule tensors (variable atom counts)
+            trajectory.append([cg['ligand'].pos.clone() for cg in data_list])
+            sc_trajectory.append(None if no_sc_in_batch else [
+                cg['atom'].pos.clone()[cg['flexResidues'].subcomponents.unique()]
+                for cg in data_list])
 
             sigmas = t_to_sigma(t_tr, t_rot, t_tor, t_sc)
             tr_g, rot_g, tor_g, sc_g = _diff_coeffs(sigmas, model_args, factor_keys)
@@ -174,32 +189,34 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
             rot_perturb = (rot_g ** 2 * dt_rot * rot_score.cpu() + rot_g * np.sqrt(dt_rot) * rot_z)
 
             if 'tor' in factor_keys:
-                tor_z = torch.zeros(tor_score.shape) if (no_final_step_noise and last) else torch.randn(
-                    *tor_score.shape)
-                tor_perturb = (tor_g ** 2 * dt_tor * tor_score.cpu() + tor_g * np.sqrt(dt_tor) * tor_z).numpy()
-                tor_per_mol = tor_perturb.shape[0] // N
+                tor_z = (torch.zeros(tor_score.shape) if (no_final_step_noise and last)
+                         else torch.randn(*tor_score.shape))
+                tor_perturb = (tor_g ** 2 * dt_tor * tor_score.cpu()
+                               + tor_g * np.sqrt(dt_tor) * tor_z).numpy()
             else:
                 tor_perturb = None
-                tor_per_mol = 0
 
             if 'sc_tor' in factor_keys:
-                sc_z = torch.zeros(sc_score.shape) if (no_final_step_noise and last) else torch.randn(*sc_score.shape)
-                sc_perturb = (sc_g ** 2 * dt_sc * sc_score.cpu() + sc_g * np.sqrt(dt_sc) * sc_z).numpy()
-                sc_tor_per_mol = sc_perturb.shape[0] // N
+                sc_z = (torch.zeros(sc_score.shape) if (no_final_step_noise and last)
+                        else torch.randn(*sc_score.shape))
+                sc_perturb = (sc_g ** 2 * dt_sc * sc_score.cpu()
+                              + sc_g * np.sqrt(dt_sc) * sc_z).numpy()
             else:
                 sc_perturb = None
-                sc_tor_per_mol = 0
 
-            if 'sc_tor' in factor_keys and sc_tor_per_mol > 0:
+            # Apply per-molecule sidechain perturbation (skip molecules with zero sc-torsions)
+            if 'sc_tor' in factor_keys:
                 for i, cg in enumerate(data_list):
-                    modify_sidechains(cg, sc_perturb[i * sc_tor_per_mol:(i + 1) * sc_tor_per_mol])
+                    if sc_tor_counts[i] > 0:
+                        modify_sidechains(cg, sc_perturb[sc_tor_offsets[i]:sc_tor_offsets[i + 1]])
+
             data_list = [
                 modify_conformer(
                     cg,
                     tr_perturb[i:i + 1],
                     rot_perturb[i:i + 1].squeeze(0),
-                    (tor_perturb[i * tor_per_mol:(i + 1) * tor_per_mol]
-                     if ('tor' in factor_keys and tor_per_mol > 0) else None),
+                    (tor_perturb[tor_offsets[i]:tor_offsets[i + 1]]
+                     if ('tor' in factor_keys and tor_counts[i] > 0) else None),
                     pivot=pivot,
                 )
                 for i, cg in enumerate(data_list)
@@ -207,19 +224,19 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
 
             g_trajectory.append((tr_g, rot_g, tor_g, sc_g))
 
-    # Terminal mean energy (logged for monitoring)
+    # Terminal mean energy
     mean_energy = _mean_energy(data_list, energy_fn)
 
     # ── Terminal adjoint  ã_K  ──────────────────────────────────────────
-    a = _terminal_adjoint(data_list, device, factor_keys, energy_fn=energy_fn)
+    a = _terminal_adjoint(data_list, device, factor_keys, energy_fn=energy_fn,
+                          tor_counts=tor_counts, sc_tor_counts=sc_tor_counts)
 
     # ── Backward walk + matching loss ───────────────────────────────────
     losses = {k: torch.zeros((), device=device) for k in factor_keys}
     base_losses = {k: torch.zeros((), device=device) for k in factor_keys}
 
-    schedules = {
-        'tr': tr_schedule, 'rot': rot_schedule, 'tor': tor_schedule, 'sc_tor': sidechain_tor_schedule,
-    }
+    schedules = {'tr': tr_schedule, 'rot': rot_schedule,
+                 'tor': tor_schedule, 'sc_tor': sidechain_tor_schedule}
 
     for t_idx in reversed(range(K)):
         t_tr, t_rot, t_tor, t_sc = (tr_schedule[t_idx], rot_schedule[t_idx],
@@ -233,44 +250,37 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
                 continue
             g_dict[k] = g.to(device) if torch.is_tensor(g) else torch.as_tensor(g, device=device)
 
-        # Restore positions to X_k
         _restore_positions(data_list, trajectory[t_idx], sc_trajectory[t_idx],
                            flexible_sidechains, no_sc_in_batch, device)
 
-        # Build xi (zero, requires_grad=True)
         xi = {
             'tr': torch.zeros(N, 3, device=device, requires_grad=True),
             'rot': torch.zeros(N, 3, device=device, requires_grad=True),
         }
         if 'tor' in factor_keys:
-            xi['tor'] = torch.zeros(N * tor_per_mol, device=device, requires_grad=True)
+            xi['tor'] = torch.zeros(total_tor, device=device, requires_grad=True)
         if 'sc_tor' in factor_keys:
-            xi['sc_tor'] = torch.zeros(N * sc_tor_per_mol, device=device, requires_grad=True)
+            xi['sc_tor'] = torch.zeros(total_sc_tor, device=device, requires_grad=True)
 
-        _apply_xi(data_list, xi, tor_per_mol, sc_tor_per_mol, factor_keys, pivot)
+        _apply_xi(data_list, xi, tor_offsets, sc_tor_offsets, factor_keys, pivot)
 
-        # One forward each through base and FT (positions now depend on xi)
         batch = Batch.from_data_list(data_list).to(device)
         _set_time_on_batch(batch, t_idx, t_tr, t_rot, t_tor, t_sc, t_schedule,
                            model_args, asyncronous_noise_schedule, device)
         s_b = dict(zip(('tr', 'rot', 'tor', 'sc_tor'), model_base(batch)))
         s_f = dict(zip(('tr', 'rot', 'tor', 'sc_tor'), model_finetune(batch)))
 
-        # VJP of s_base wrt xi with v = g²·Δt·a_{k+1}
         vjps = torch.autograd.grad(
             outputs=[s_b[k] for k in factor_keys],
             inputs=[xi[k] for k in factor_keys],
             grad_outputs=[(g_dict[k] ** 2 * dt[k]) * a[k] for k in factor_keys],
             retain_graph=True, create_graph=False, allow_unused=True,
         )
-        # Replace None (disconnected / empty input) with zeros — keeps shapes consistent
         vjp_dict = {k: (v if v is not None else torch.zeros_like(xi[k]))
                     for k, v in zip(factor_keys, vjps)}
 
-        # Adjoint update — vector addition in each Lie-algebra dual
         a = {k: (a[k] + vjp_dict[k]).detach() for k in factor_keys}
 
-        # Matching loss term  g²·Δt·||Δs + a_k||²
         for k in factor_keys:
             delta = s_f[k] - s_b[k].detach()
             weight = g_dict[k] ** 2 * dt[k]
