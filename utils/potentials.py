@@ -43,7 +43,7 @@ def get_steric_clash_overlap(pos_1, pos_2, atomic_numbers_1, atomic_numbers_2):
 
 class StericClashEnergy:
     def __init__(self, args):
-        self.energy_weight = args.energy_weight
+        self.energy_weight = float(args.energy_weight)
 
     def __call__(self, complex_graph):
         lig_pos = complex_graph["ligand"].pos
