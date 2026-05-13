@@ -94,14 +94,19 @@ def get_potential_gradients(complex_graph, potential):
         modify_sidechains(complex_graph, sidechain_tor_update)
 
         pot = potential(complex_graph)
-        pot.backward()
 
-        tr_grad = tr_update.grad
-        rot_grad = rot_update.grad
-        tor_grad = tor_update.grad
-        sidechain_tor_grad = sidechain_tor_update.grad
+        grads = torch.autograd.grad(
+            pot,
+            [tr_update, rot_update, tor_update, sidechain_tor_update],
+            allow_unused=True,
+        )
 
-    return tr_grad, rot_grad, tor_grad, sidechain_tor_grad
+        grads = tuple(
+            g.detach() if g is not None else None
+            for g in grads
+        )
+
+    return grads
 
 
 def get_energy_function(name, args):
