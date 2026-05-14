@@ -237,7 +237,7 @@ def main_function():
 
     if args.wandb:
         import wandb
-        wandb.init(
+        run = wandb.init(
             entity='bd825-imperial-college-london',
             settings=wandb.Settings(start_method="fork"),
             project=args.project,
@@ -246,6 +246,12 @@ def main_function():
             config=args
         )
         wandb.log({'numel': numel})
+
+        run.alert(
+            title="Run Started",
+            text=f"Run {run.name} has started on {run.dir}",
+            level=wandb.AlertLevel.INFO
+        )
 
     # record parameters
     run_dir = os.path.join(args.log_dir, args.run_name)
