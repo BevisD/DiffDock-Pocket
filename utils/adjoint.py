@@ -87,6 +87,8 @@ def _restore_positions(data_list, traj_t, sc_traj_t, flexible_sidechains, no_sc_
     """traj_t and sc_traj_t are Python lists of per-molecule tensors."""
     for i, cg in enumerate(data_list):
         cg['ligand'].pos = traj_t[i].clone().to(device)
+        if 'atom' in cg.node_types:
+            cg['atom'].pos = cg['atom'].pos.detach().clone()
         if flexible_sidechains and not no_sc_in_batch:
             sub_idx = cg['flexResidues'].subcomponents.unique()
             cg['atom'].pos[sub_idx] = sc_traj_t[i].clone().to(device)
@@ -288,11 +290,19 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
             base_losses[k] = base_losses[k] + weight * (a[k] ** 2).sum()
 
     weight_map = {'tr': tr_weight, 'rot': rot_weight, 'tor': tor_weight, 'sc_tor': sc_tor_weight}
-    total_loss = sum(weight_map[k] * losses[k] for k in factor_keys) / N
-    log_dict = {f'{k}_loss': (losses[k].detach() / N).item() for k in factor_keys}
-    log_dict.update(
-        {f'{k}_base_loss': (base_losses[k].detach() / N).item() for k in factor_keys})
-    log_dict['total_loss'] = total_loss.detach().item()
-    log_dict['total_base_loss'] = (sum(base_losses.values()).detach() / N).item()
-    log_dict['mean_energy'] = mean_energy
+    total_loss      = sum(weight_map[k] * losses[k]      for k in factor_keys) / N
+    total_base_loss = sum(weight_map[k] * base_losses[k] for k in factor_keys) / N
+
+    all_factor_keys = ('tr', 'rot', 'tor', 'sc_tor')
+    log_dict = {}
+    for k in all_factor_keys:
+        if k in factor_keys:
+            log_dict[f'{k}_loss']      = (losses[k].detach()      / N).cpu()
+            log_dict[f'{k}_base_loss'] = (base_losses[k].detach() / N).cpu()
+        else:
+            log_dict[f'{k}_loss']      = torch.zeros(())
+            log_dict[f'{k}_base_loss'] = torch.zeros(())
+    log_dict['total_loss']      = total_loss.detach().cpu()
+    log_dict['total_base_loss'] = total_base_loss.detach().cpu()
+
     return total_loss, log_dict

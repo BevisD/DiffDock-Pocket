@@ -106,6 +106,9 @@ def get_potential_gradients(complex_graph, potential):
             for g in grads
         )
 
+        complex_graph["ligand"].pos = complex_graph["ligand"].pos.detach()
+        complex_graph["atom"].pos   = complex_graph["atom"].pos.detach()
+
     return grads
 
 
