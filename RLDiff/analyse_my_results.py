@@ -2,6 +2,7 @@ import os
 import re
 import json
 import math
+import signal
 import argparse
 from pathlib import Path
 from multiprocessing import Pool
@@ -78,6 +79,11 @@ def find_rmsd_le2_col(df: pd.DataFrame):
 
     raise ValueError(f"Could not find RMSD<=2A column. Columns: {list(df.columns)}")
 
+class PoseBustersTimeout(Exception):
+    pass
+
+def _alarm_handler(signum, frame):
+    raise PoseBustersTimeout("PoseBusters timed out")
 
 def eval_one_complex(task):
     complex_key, complex_dir_str, protein_path, true_ligand_path = task
@@ -94,23 +100,25 @@ def eval_one_complex(task):
     buster = PoseBusters(config="redock")
     per_pose_rows = []
 
+    # Register the alarm handler once per worker process
+    signal.signal(signal.SIGALRM, _alarm_handler)
+
     for pose_idx, pose_path in enumerate(pose_files):
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    buster.bust,
+            signal.alarm(60)          # Set a 60s hard deadline
+            try:
+                pb_df = buster.bust(
                     mol_pred=str(pose_path),
                     mol_true=str(true_ligand_path),
                     mol_cond=str(protein_path),
                     full_report=False,
                 )
+            finally:
+                signal.alarm(0)       # Cancel alarm on success or any exception
 
-            pb_df = future.result(timeout=60)
             row = pb_df.iloc[0].copy()
-
             bool_cols = get_bool_columns(pb_df)
             rmsd_col = find_rmsd_le2_col(pb_df)
-
             pb_valid_cols = [c for c in bool_cols if c != rmsd_col]
             pb_valid = bool(row[pb_valid_cols].all())
             rmsd_le_2 = bool(row[rmsd_col])
@@ -130,13 +138,13 @@ def eval_one_complex(task):
                 "pb_eval_failed": False,
                 "pb_eval_error": "",
             }
-
             for c in bool_cols:
                 out[c] = bool(row[c])
 
             per_pose_rows.append(out)
 
         except Exception as e:
+            signal.alarm(0)  # Safety net: ensure alarm is cancelled
             per_pose_rows.append({
                 "complex_name": complex_key,
                 "pose_file": str(pose_path),
