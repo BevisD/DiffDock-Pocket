@@ -203,8 +203,13 @@ def main_function():
     model_finetune = get_model(base_model_args, device, t_to_sigma=t_to_sigma)
 
     state_dict = torch.load(f'{args.base_model_dir}/{args.base_model_ckpt}', map_location=device)
-    model_base.load_state_dict(state_dict, strict=True)
-    model_finetune.load_state_dict(state_dict, strict=True)
+
+    if device.type == 'cuda':
+        model_base.module.load_state_dict(state_dict, strict=True)
+        model_finetune.module.load_state_dict(state_dict, strict=True)
+    else:
+        model_base.load_state_dict(state_dict, strict=True)
+        model_finetune.load_state_dict(state_dict, strict=True)
 
     model_base = model_base.to(device)
     model_finetune = model_finetune.to(device)
