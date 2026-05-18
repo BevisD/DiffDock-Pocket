@@ -32,14 +32,28 @@ def _diff_coeffs(sigmas, model_args, factor_keys):
     return tr_g, rot_g, tor_g, sc_g
 
 
-def _set_time_on_batch(batch, t_idx, t_tr, t_rot, t_tor, t_sc, t_schedule, model_args, async_, device):
-    set_time(batch,
-             t_schedule[t_idx] if t_schedule is not None else None,
-             t_tr, t_rot, t_tor, t_sc, batch.num_graphs,
-             'all_atoms' in model_args and model_args.all_atoms,
-             async_, device,
-             include_miscellaneous_atoms=hasattr(model_args, 'include_miscellaneous_atoms')
-                                         and model_args.include_miscellaneous_atoms)
+def _set_time_on_batch(data_list, t_idx, t_tr, t_rot, t_tor, t_sc,
+                       t_schedule, model_args, async_, device):
+    """Set time on the data and return the model's input:
+       GPU: model is DataParallel-wrapped — return the list, set_time per graph.
+       CPU: return a Batch with time already set on it."""
+    t_norm = t_schedule[t_idx] if t_schedule is not None else None
+    all_atoms = 'all_atoms' in model_args and model_args.all_atoms
+    misc = (hasattr(model_args, 'include_miscellaneous_atoms')
+            and model_args.include_miscellaneous_atoms)
+
+    if device.type == 'cuda':
+        for cg in data_list:
+            set_time(cg, t_norm, t_tr, t_rot, t_tor, t_sc, 1,
+                     all_atoms, async_, device,
+                     include_miscellaneous_atoms=misc)
+        return data_list
+
+    batch = Batch.from_data_list(data_list).to(device)
+    set_time(batch, t_norm, t_tr, t_rot, t_tor, t_sc, batch.num_graphs,
+             all_atoms, async_, device,
+             include_miscellaneous_atoms=misc)
+    return batch
 
 
 def _terminal_adjoint(data_list, device, factor_keys, energy_fn, tor_counts, sc_tor_counts):
@@ -179,10 +193,10 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
             sigmas = t_to_sigma(t_tr, t_rot, t_tor, t_sc)
             tr_g, rot_g, tor_g, sc_g = _diff_coeffs(sigmas, model_args, factor_keys)
 
-            batch = Batch.from_data_list(data_list).to(device)
-            _set_time_on_batch(batch, t_idx, t_tr, t_rot, t_tor, t_sc, t_schedule,
-                               model_args, asyncronous_noise_schedule, device)
-            tr_score, rot_score, tor_score, sc_score = model_finetune(batch)
+            model_input = _set_time_on_batch(
+                data_list, t_idx, t_tr, t_rot, t_tor, t_sc,
+                t_schedule, model_args, asyncronous_noise_schedule, device)
+            tr_score, rot_score, tor_score, sc_score = model_finetune(model_input)
 
             last = (t_idx == K - 1)
             tr_z = torch.zeros(N, 3) if (no_final_step_noise and last) else torch.randn(N, 3)
@@ -266,11 +280,11 @@ def adjoint_loss(data_list, model_base, model_finetune, energy_fn, inference_ste
 
         _apply_xi(data_list, xi, tor_offsets, sc_tor_offsets, factor_keys, pivot)
 
-        batch = Batch.from_data_list(data_list).to(device)
-        _set_time_on_batch(batch, t_idx, t_tr, t_rot, t_tor, t_sc, t_schedule,
-                           model_args, asyncronous_noise_schedule, device)
-        s_b = dict(zip(('tr', 'rot', 'tor', 'sc_tor'), model_base(batch)))
-        s_f = dict(zip(('tr', 'rot', 'tor', 'sc_tor'), model_finetune(batch)))
+        model_input = _set_time_on_batch(
+            data_list, t_idx, t_tr, t_rot, t_tor, t_sc,
+            t_schedule, model_args, asyncronous_noise_schedule, device)
+        s_b = dict(zip(('tr', 'rot', 'tor', 'sc_tor'), model_base(model_input)))
+        s_f = dict(zip(('tr', 'rot', 'tor', 'sc_tor'), model_finetune(model_input)))
 
         vjps = torch.autograd.grad(
             outputs=[s_b[k] for k in factor_keys],
