@@ -146,15 +146,15 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
             else:
                 tr_scale = rot_scale = tor_scale = sc_scale = 1.0
 
-            tr_score = tr_score + tr_scale * e_tr_grad.cpu()
-            rot_score = rot_score + rot_scale * e_rot_grad.cpu()
+            tr_score = tr_score - tr_scale * e_tr_grad.cpu()
+            rot_score = rot_score - rot_scale * e_rot_grad.cpu()
 
             if not model_args.no_torsion and e_tor_grad is not None:
-                tor_score = tor_score + tor_scale * e_tor_grad.cpu()
+                tor_score = tor_score - tor_scale * e_tor_grad.cpu()
 
             if flexible_sidechains and e_sc_grad is not None:
                 sidechain_tor_score = (sidechain_tor_score
-                                       + sc_scale * e_sc_grad.cpu())
+                                       - sc_scale * e_sc_grad.cpu())
 
         tr_g = tr_sigma * torch.sqrt(torch.tensor(2 * np.log(model_args.tr_sigma_max / model_args.tr_sigma_min)))
         rot_g = 2 * rot_sigma * torch.sqrt(torch.tensor(np.log(model_args.rot_sigma_max / model_args.rot_sigma_min)))
